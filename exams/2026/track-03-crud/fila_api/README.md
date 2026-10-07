@@ -14,7 +14,7 @@ Isso materializa `params.json`, que é copiado para o container e não depende d
 
 ```bash
 pip install -r requirements.txt
-python app.py
+python main.py
 ```
 
 API: `http://localhost:8080`
