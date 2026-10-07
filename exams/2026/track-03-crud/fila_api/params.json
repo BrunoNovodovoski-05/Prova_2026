@@ -1,3 +1,6 @@
 {
-  "repositorio": "SUBSTITUA_PELO_NOME_EXATO_DO_REPOSITORIO"
+  "repositorio": "nome-exato-do-repositorio",
+  "prefixo": "A",
+  "razao_preferencial": 2,
+  "porta_api": 9201
 }
