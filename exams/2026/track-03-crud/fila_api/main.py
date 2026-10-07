@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -8,91 +9,98 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
+TZ = timezone(timedelta(hours=-3))
+PREFIXOS = ["A", "B", "C", "D", "E", "F"]
+RAZOES = [2, 3]
+PORTA_BASE = 9201
+FAIXA = 5
 
 BASE_DIR = Path(__file__).resolve().parent
-PARAMS_FILE = BASE_DIR / "params.json"
-
-FUSO = timezone(timedelta(hours=-3))
 
 
-def carregar_parametros():
+def carregar_variante():
     """
-    Carrega a variante usada pela aplicação.
+    Carrega params.json se existir.
+    Caso contrário, tenta derivar pelo nome do diretório do projeto.
 
-    Prioridade:
-    1. Variáveis de ambiente, se fornecidas.
-    2. params.json.
+    Formato aceito de params.json:
+    {
+      "repositorio": "nome-exato-do-repositorio"
+    }
 
-    Nenhuma variável de ambiente é obrigatória.
+    Também aceita os campos já materializados:
+    {
+      "prefixo": "A",
+      "razao_preferencial": 2,
+      "porta_api": 9201
+    }
     """
+    params_path = BASE_DIR / "params.json"
 
-    prefixo_env = os.environ.get("PREFIXO")
-    razao_env = os.environ.get("RAZAO_PREFERENCIAL")
+    if params_path.exists():
+        with params_path.open("r", encoding="utf-8") as f:
+            dados = json.load(f)
 
-    if prefixo_env and razao_env:
-        return prefixo_env, int(razao_env)
+        if {
+            "prefixo",
+            "razao_preferencial",
+            "porta_api",
+        }.issubset(dados):
+            return (
+                str(dados["prefixo"]),
+                int(dados["razao_preferencial"]),
+                int(dados["porta_api"]),
+            )
 
-    if not PARAMS_FILE.exists():
-        raise RuntimeError(
-            "params.json não encontrado. "
-            "Execute: python gerar_params.py NOME_DO_REPOSITORIO"
-        )
+        nome_repo = dados.get("repositorio")
+        if nome_repo:
+            return derivar_variante(nome_repo)
 
-    with open(PARAMS_FILE, "r", encoding="utf-8") as arquivo:
-        dados = json.load(arquivo)
-
-    if "prefixo" not in dados or "razao_preferencial" not in dados:
-        raise RuntimeError(
-            "params.json inválido. "
-            "Execute gerar_params.py novamente."
-        )
-
-    return (
-        str(dados["prefixo"]),
-        int(dados["razao_preferencial"]),
-    )
+    # Fallback útil em execução local. Dentro do container o diretório pode ser /app,
+    # então para a correção real recomenda-se versionar params.json.
+    return derivar_variante(BASE_DIR.name)
 
 
-PREFIXO, RAZAO_PREFERENCIAL = carregar_parametros()
+def derivar_variante(nome_repo: str):
+    digest = hashlib.sha256(nome_repo.encode("utf-8")).digest()
+    numero = int.from_bytes(digest, "big")
+
+    prefixo = PREFIXOS[numero % len(PREFIXOS)]
+    razao = RAZOES[numero % len(RAZOES)]
+    porta = PORTA_BASE + (numero % FAIXA)
+
+    return prefixo, razao, porta
 
 
-# ============================================================
-# BANCO
-# ============================================================
+PREFIXO, RAZAO_PREFERENCIAL, PORTA_API = carregar_variante()
 
-def caminho_banco():
-    """
-    Na correção escondida, /data será um volume persistente.
 
-    Nos testes locais, se /data não puder ser usado,
-    o banco fica no diretório da aplicação.
-    """
-
-    pasta_data = Path("/data")
+def escolher_banco():
+    data_dir = Path("/data")
 
     try:
-        pasta_data.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
 
-        teste = pasta_data / ".teste_escrita"
+        teste = data_dir / ".write_test"
         teste.write_text("ok", encoding="utf-8")
-        teste.unlink()
+        teste.unlink(missing_ok=True)
 
-        return pasta_data / "fila.db"
+        return data_dir / "fila.db"
 
     except Exception:
         return BASE_DIR / "fila.db"
 
 
-DB_PATH = caminho_banco()
+DB_PATH = escolher_banco()
+
+app = Flask(__name__)
+app.config["JSON_SORT_KEYS"] = False
 
 
 @contextmanager
-def conectar(escrita=False):
+def conexao(immediate=False):
     conn = sqlite3.connect(
-        str(DB_PATH),
+        DB_PATH,
         timeout=30,
         isolation_level=None,
     )
@@ -102,19 +110,17 @@ def conectar(escrita=False):
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
 
-    if escrita:
-        # Garante que duas emissões simultâneas não usem
-        # a mesma sequência.
+    if immediate:
         conn.execute("BEGIN IMMEDIATE")
 
     try:
         yield conn
 
-        if escrita:
+        if immediate:
             conn.execute("COMMIT")
 
     except Exception:
-        if escrita:
+        if immediate:
             conn.execute("ROLLBACK")
 
         raise
@@ -123,98 +129,77 @@ def conectar(escrita=False):
         conn.close()
 
 
-def agora():
-    return datetime.now(FUSO)
-
-
 def agora_iso():
-    return agora().isoformat(timespec="seconds")
+    return datetime.now(TZ).isoformat(timespec="seconds")
 
 
-def hoje():
-    return agora().date().isoformat()
+def hoje_local():
+    return datetime.now(TZ).date().isoformat()
 
 
-def iniciar_banco():
-    with conectar(escrita=True) as conn:
-
+def init_db():
+    with conexao() as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS senhas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 codigo TEXT NOT NULL,
                 data_emissao TEXT NOT NULL,
-
-                tipo TEXT NOT NULL
-                    CHECK (
-                        tipo IN (
-                            'normal',
-                            'preferencial'
-                        )
-                    ),
-
+                tipo TEXT NOT NULL CHECK(tipo IN ('normal', 'preferencial')),
                 emissao TEXT NOT NULL,
-
-                status TEXT NOT NULL
-                    CHECK (
-                        status IN (
-                            'aguardando',
-                            'chamada',
-                            'concluida',
-                            'cancelada'
-                        )
-                    ),
-
+                status TEXT NOT NULL CHECK(
+                    status IN (
+                        'aguardando',
+                        'chamada',
+                        'concluida',
+                        'cancelada'
+                    )
+                ),
                 chamada_em TEXT,
-
                 UNIQUE(data_emissao, codigo)
             );
-
 
             CREATE TABLE IF NOT EXISTS estado (
                 chave TEXT PRIMARY KEY,
                 valor TEXT NOT NULL
             );
 
-
-            CREATE TABLE IF NOT EXISTS painel (
+            CREATE TABLE IF NOT EXISTS painel_eventos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 senha_id INTEGER NOT NULL,
-
                 chamada_em TEXT NOT NULL,
-
-                FOREIGN KEY(senha_id)
-                    REFERENCES senhas(id)
+                FOREIGN KEY(senha_id) REFERENCES senhas(id)
             );
             """
         )
 
         conn.execute(
             """
-            INSERT OR IGNORE INTO estado(chave, valor)
+            INSERT OR IGNORE
+            INTO estado(chave, valor)
             VALUES('data_sequencia', ?)
             """,
-            (hoje(),),
+            (hoje_local(),),
         )
 
         conn.execute(
             """
-            INSERT OR IGNORE INTO estado(chave, valor)
+            INSERT OR IGNORE
+            INTO estado(chave, valor)
             VALUES('sequencia', '0')
             """
         )
 
         conn.execute(
             """
-            INSERT OR IGNORE INTO estado(chave, valor)
+            INSERT OR IGNORE
+            INTO estado(chave, valor)
             VALUES('preferenciais_no_ciclo', '0')
             """
         )
 
 
-def obter_estado(conn, chave, padrao):
+def get_estado(conn, chave, padrao=None):
     row = conn.execute(
         """
         SELECT valor
@@ -224,13 +209,10 @@ def obter_estado(conn, chave, padrao):
         (chave,),
     ).fetchone()
 
-    if row is None:
-        return padrao
-
-    return row["valor"]
+    return row["valor"] if row else padrao
 
 
-def definir_estado(conn, chave, valor):
+def set_estado(conn, chave, valor):
     conn.execute(
         """
         INSERT INTO estado(chave, valor)
@@ -246,11 +228,7 @@ def definir_estado(conn, chave, valor):
     )
 
 
-# ============================================================
-# SENHAS
-# ============================================================
-
-def serializar(row):
+def serializar_senha(row):
     dados = {
         "codigo": row["codigo"],
         "tipo": row["tipo"],
@@ -264,42 +242,15 @@ def serializar(row):
     return dados
 
 
-def buscar_por_id(conn, senha_id):
-    return conn.execute(
-        """
-        SELECT
-            id,
-            codigo,
-            data_emissao,
-            tipo,
-            emissao,
-            status,
-            chamada_em
-
-        FROM senhas
-
-        WHERE id = ?
-        """,
-        (senha_id,),
-    ).fetchone()
-
-
-def buscar_por_codigo(conn, codigo):
-    """
-    A sequência reinicia diariamente.
-
-    Portanto A001 pode existir em dias diferentes.
-
-    Como a URL possui somente o código, utiliza-se
-    a ocorrência mais recente.
-    """
+def buscar_senha(conn, codigo):
+    # Como a sequência reinicia diariamente, o mesmo código pode reaparecer
+    # em dias diferentes. O endpoint por código opera sobre a ocorrência mais recente.
 
     return conn.execute(
         """
         SELECT
             id,
             codigo,
-            data_emissao,
             tipo,
             emissao,
             status,
@@ -319,17 +270,31 @@ def buscar_por_codigo(conn, codigo):
     ).fetchone()
 
 
-def primeira_aguardando(conn, tipo):
-    """
-    FIFO dentro de cada categoria.
-    """
-
+def buscar_senha_por_id(conn, senha_id):
     return conn.execute(
         """
         SELECT
             id,
             codigo,
-            data_emissao,
+            tipo,
+            emissao,
+            status,
+            chamada_em
+
+        FROM senhas
+
+        WHERE id = ?
+        """,
+        (senha_id,),
+    ).fetchone()
+
+
+def primeira_aguardando(conn, tipo):
+    return conn.execute(
+        """
+        SELECT
+            id,
+            codigo,
             tipo,
             emissao,
             status,
@@ -341,26 +306,15 @@ def primeira_aguardando(conn, tipo):
             status = 'aguardando'
             AND tipo = ?
 
-        ORDER BY id ASC
+        ORDER BY
+            emissao ASC,
+            codigo ASC
 
         LIMIT 1
         """,
         (tipo,),
     ).fetchone()
 
-
-# ============================================================
-# FLASK
-# ============================================================
-
-app = Flask(__name__)
-
-app.json.sort_keys = False
-
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @app.get("/healthz")
 def healthz():
@@ -371,62 +325,46 @@ def healthz():
     ), 200
 
 
-# ============================================================
-# EMITIR SENHA
-# ============================================================
-
 @app.post("/senhas")
 def emitir_senha():
-    dados = request.get_json(silent=True)
-
-    if not isinstance(dados, dict):
-        dados = {}
+    dados = request.get_json(silent=True) or {}
 
     tipo = dados.get("tipo")
 
-    if tipo not in (
-        "normal",
-        "preferencial",
-    ):
+    if tipo not in ("normal", "preferencial"):
         return jsonify(
             {
                 "erro": "tipo_invalido"
             }
         ), 422
 
-    with conectar(escrita=True) as conn:
+    with conexao(immediate=True) as conn:
+        data_atual = hoje_local()
 
-        data_atual = hoje()
-
-        data_sequencia = obter_estado(
+        data_seq = get_estado(
             conn,
             "data_sequencia",
             data_atual,
         )
 
         sequencia = int(
-            obter_estado(
+            get_estado(
                 conn,
                 "sequencia",
                 "0",
             )
         )
 
-        # ================================================
-        # REINÍCIO DIÁRIO
-        # ================================================
-
-        if data_sequencia != data_atual:
-
+        if data_seq != data_atual:
             sequencia = 0
 
-            definir_estado(
+            set_estado(
                 conn,
                 "data_sequencia",
                 data_atual,
             )
 
-            definir_estado(
+            set_estado(
                 conn,
                 "sequencia",
                 0,
@@ -434,7 +372,7 @@ def emitir_senha():
 
         sequencia += 1
 
-        definir_estado(
+        set_estado(
             conn,
             "sequencia",
             sequencia,
@@ -444,9 +382,9 @@ def emitir_senha():
 
         emissao = agora_iso()
 
-        cursor = conn.execute(
+        conn.execute(
             """
-            INSERT INTO senhas (
+            INSERT INTO senhas(
                 codigo,
                 data_emissao,
                 tipo,
@@ -455,7 +393,7 @@ def emitir_senha():
                 chamada_em
             )
 
-            VALUES (
+            VALUES(
                 ?,
                 ?,
                 ?,
@@ -472,26 +410,20 @@ def emitir_senha():
             ),
         )
 
-        senha = buscar_por_id(
+        row = buscar_senha(
             conn,
-            cursor.lastrowid,
+            codigo,
         )
 
         return jsonify(
-            serializar(senha)
+            serializar_senha(row)
         ), 201
 
 
-# ============================================================
-# PRÓXIMA SENHA
-# ============================================================
-
 @app.get("/senhas/proxima")
 def proxima_senha():
-
-    with conectar(escrita=True) as conn:
-
-        preferencial = primeira_aguardando(
+    with conexao(immediate=True) as conn:
+        pref = primeira_aguardando(
             conn,
             "preferencial",
         )
@@ -501,76 +433,51 @@ def proxima_senha():
             "normal",
         )
 
-        if preferencial is None and normal is None:
+        if pref is None and normal is None:
             return jsonify(
                 {
                     "erro": "fila_vazia"
                 }
             ), 404
 
-        usadas = int(
-            obter_estado(
+        usados = int(
+            get_estado(
                 conn,
                 "preferenciais_no_ciclo",
                 "0",
             )
         )
 
-        # ================================================
-        # HÁ NORMAL E PREFERENCIAL
-        # ================================================
-
-        if preferencial is not None and normal is not None:
-
-            if usadas < RAZAO_PREFERENCIAL:
-
-                escolhida = preferencial
-
-                usadas += 1
+        if pref is not None and normal is not None:
+            if usados < RAZAO_PREFERENCIAL:
+                escolhida = pref
+                usados += 1
 
             else:
-
                 escolhida = normal
+                usados = 0
 
-                usadas = 0
+        elif pref is not None:
+            escolhida = pref
 
-        # ================================================
-        # SOMENTE PREFERENCIAL
-        # ================================================
-
-        elif preferencial is not None:
-
-            escolhida = preferencial
-
-            # Se já alcançou a razão, permanece saturada.
-            #
-            # Assim, se aparecer uma normal depois,
-            # ela será chamada imediatamente.
-            usadas = min(
-                usadas + 1,
+            usados = min(
+                usados + 1,
                 RAZAO_PREFERENCIAL,
             )
 
-        # ================================================
-        # SOMENTE NORMAL
-        # ================================================
-
         else:
-
             escolhida = normal
 
-            usadas = 0
+            usados = 0
 
-        definir_estado(
+        set_estado(
             conn,
             "preferenciais_no_ciclo",
-            usadas,
+            usados,
         )
 
         chamada_em = agora_iso()
 
-        # IMPORTANTE:
-        # usamos o ID e não o código.
         conn.execute(
             """
             UPDATE senhas
@@ -579,22 +486,22 @@ def proxima_senha():
                 status = 'chamada',
                 chamada_em = ?
 
-            WHERE id = ?
+            WHERE codigo = ?
             """,
             (
                 chamada_em,
-                escolhida["id"],
+                escolhida["codigo"],
             ),
         )
 
         conn.execute(
             """
-            INSERT INTO painel (
+            INSERT INTO painel_eventos(
                 senha_id,
                 chamada_em
             )
 
-            VALUES (?, ?)
+            VALUES(?, ?)
             """,
             (
                 escolhida["id"],
@@ -602,38 +509,32 @@ def proxima_senha():
             ),
         )
 
-        senha = buscar_por_id(
+        row = buscar_senha(
             conn,
-            escolhida["id"],
+            escolhida["codigo"],
         )
 
         return jsonify(
-            serializar(senha)
+            serializar_senha(row)
         ), 200
 
 
-# ============================================================
-# CONCLUIR
-# ============================================================
-
 @app.post("/senhas/<codigo>/concluir")
-def concluir(codigo):
-
-    with conectar(escrita=True) as conn:
-
-        senha = buscar_por_codigo(
+def concluir_senha(codigo):
+    with conexao(immediate=True) as conn:
+        row = buscar_senha(
             conn,
             codigo,
         )
 
-        if senha is None:
+        if row is None:
             return jsonify(
                 {
                     "erro": "senha_nao_encontrada"
                 }
             ), 404
 
-        if senha["status"] != "chamada":
+        if row["status"] != "chamada":
             return jsonify(
                 {
                     "erro": "senha_nao_chamada"
@@ -643,46 +544,38 @@ def concluir(codigo):
         conn.execute(
             """
             UPDATE senhas
-
             SET status = 'concluida'
-
-            WHERE id = ?
+            WHERE codigo = ?
             """,
-            (senha["id"],),
+            (codigo,),
         )
 
-        senha = buscar_por_id(
-            conn,
-            senha["id"],
-        )
-
-        return jsonify(
-            serializar(senha)
-        ), 200
-
-
-# ============================================================
-# RECHAMAR
-# ============================================================
-
-@app.post("/senhas/<codigo>/rechamar")
-def rechamar(codigo):
-
-    with conectar(escrita=True) as conn:
-
-        senha = buscar_por_codigo(
+        row = buscar_senha(
             conn,
             codigo,
         )
 
-        if senha is None:
+        return jsonify(
+            serializar_senha(row)
+        ), 200
+
+
+@app.post("/senhas/<codigo>/rechamar")
+def rechamar_senha(codigo):
+    with conexao(immediate=True) as conn:
+        row = buscar_senha(
+            conn,
+            codigo,
+        )
+
+        if row is None:
             return jsonify(
                 {
                     "erro": "senha_nao_encontrada"
                 }
             ), 404
 
-        if senha["status"] != "chamada":
+        if row["status"] != "chamada":
             return jsonify(
                 {
                     "erro": "senha_nao_chamada"
@@ -697,62 +590,55 @@ def rechamar(codigo):
 
             SET chamada_em = ?
 
-            WHERE id = ?
+            WHERE codigo = ?
             """,
             (
                 chamada_em,
-                senha["id"],
+                codigo,
             ),
         )
 
-        # Rechamada gera um novo evento no painel.
         conn.execute(
             """
-            INSERT INTO painel (
+            INSERT INTO painel_eventos(
                 senha_id,
                 chamada_em
             )
 
-            VALUES (?, ?)
+            VALUES(?, ?)
             """,
             (
-                senha["id"],
+                row["id"],
                 chamada_em,
             ),
         )
 
-        senha = buscar_por_id(
-            conn,
-            senha["id"],
-        )
-
-        return jsonify(
-            serializar(senha)
-        ), 200
-
-
-# ============================================================
-# CANCELAR
-# ============================================================
-
-@app.post("/senhas/<codigo>/cancelar")
-def cancelar(codigo):
-
-    with conectar(escrita=True) as conn:
-
-        senha = buscar_por_codigo(
+        row = buscar_senha(
             conn,
             codigo,
         )
 
-        if senha is None:
+        return jsonify(
+            serializar_senha(row)
+        ), 200
+
+
+@app.post("/senhas/<codigo>/cancelar")
+def cancelar_senha(codigo):
+    with conexao(immediate=True) as conn:
+        row = buscar_senha(
+            conn,
+            codigo,
+        )
+
+        if row is None:
             return jsonify(
                 {
                     "erro": "senha_nao_encontrada"
                 }
             ), 404
 
-        if senha["status"] != "aguardando":
+        if row["status"] != "aguardando":
             return jsonify(
                 {
                     "erro": "senha_nao_aguardando"
@@ -765,39 +651,33 @@ def cancelar(codigo):
 
             SET status = 'cancelada'
 
-            WHERE id = ?
+            WHERE codigo = ?
             """,
-            (senha["id"],),
+            (codigo,),
         )
 
-        senha = buscar_por_id(
+        row = buscar_senha(
             conn,
-            senha["id"],
+            codigo,
         )
 
         return jsonify(
-            serializar(senha)
+            serializar_senha(row)
         ), 200
 
 
-# ============================================================
-# PAINEL
-# ============================================================
-
 @app.get("/painel")
-def obter_painel():
-
-    with conectar() as conn:
-
+def painel():
+    with conexao() as conn:
         eventos = conn.execute(
             """
             SELECT
-                senha_id,
-                MAX(id) AS ultimo_evento
+                pe.senha_id,
+                MAX(pe.id) AS ultimo_evento
 
-            FROM painel
+            FROM painel_eventos pe
 
-            GROUP BY senha_id
+            GROUP BY pe.senha_id
 
             ORDER BY ultimo_evento DESC
 
@@ -808,15 +688,14 @@ def obter_painel():
         chamadas = []
 
         for evento in eventos:
-
-            senha = buscar_por_id(
+            row = buscar_senha_por_id(
                 conn,
                 evento["senha_id"],
             )
 
-            if senha is not None:
+            if row is not None:
                 chamadas.append(
-                    serializar(senha)
+                    serializar_senha(row)
                 )
 
         return jsonify(
@@ -826,11 +705,7 @@ def obter_painel():
         ), 200
 
 
-# ============================================================
-# INICIALIZAÇÃO
-# ============================================================
-
-iniciar_banco()
+init_db()
 
 
 if __name__ == "__main__":
