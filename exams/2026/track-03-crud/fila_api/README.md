@@ -17,7 +17,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
-API: `http://localhost:8080`
+API:
+
+```text
+http://localhost:8080
+```
 
 ## 3. Build do container
 
@@ -25,17 +29,27 @@ API: `http://localhost:8080`
 docker build -f Containerfile -t fila-atendimento .
 ```
 
-Confira a porta externa em `params.json` e rode, por exemplo:
+Confira a porta externa em `params.json`.
+
+Por exemplo:
 
 ```bash
 docker run --rm -p 9201:8080 fila-atendimento
 ```
 
-Para testar persistência escondida equivalente à correção:
+Para testar persistência equivalente à correção:
 
 ```bash
 docker volume create fila-data
-docker run --rm -p 9201:8080 -v fila-data:/data fila-atendimento
+```
+
+Depois:
+
+```bash
+docker run --rm \
+  -p 9201:8080 \
+  -v fila-data:/data \
+  fila-atendimento
 ```
 
 ## Endpoints
