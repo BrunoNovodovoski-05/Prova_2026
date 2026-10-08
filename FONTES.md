@@ -38,7 +38,7 @@ conta. Se nenhum site foi consultado, escreva: **"Nenhum site consultado."**)*
 
 | # | Link público da conversa | Onde o conteúdo foi usado |
 | --- | --- | --- |
-| — | | |
+| — | https://chatgpt.com/share/6ac6ddd2-7418-83e9-bf6d-6df4fae71633 | |
 
 *(Se nenhuma IA foi utilizada, escreva: **"Nenhuma IA utilizada."**)*
 
