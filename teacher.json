@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "repo": "Prova_2026",
+  "repo_url": "https://github.com/BrunoNovodovoski-05/Prova_2026",
+  "exam_dir": "exams/2026/track-03-crud",
+  "track": "track-03-crud",
+  "issue": 1,
+  "issue_url": "https://github.com/BrunoNovodovoski-05/Prova_2026/issues/1",
+  "gerado_em": "2026-10-08T00:07:35+00:00",
+  "fechada_em": "2026-10-08T00:07:13Z",
+  "aplicada": true,
+  "motivo": null,
+  "aluno": {
+    "login": "BrunoNovodovoski-05",
+    "ra": "231759712",
+    "nome": "Bruno Novodovoski"
+  },
+  "variante": {
+    "slug": "Prova_2026",
+    "EXAM_DIR": "exams/2026/track-03-crud",
+    "PREFIXO": "A",
+    "RAZAO_PREFERENCIAL": 2,
+    "PORTA_API": 9202
+  },
+  "janela": {
+    "minutos": 120,
+    "t0": "2026-10-07T22:22:54Z",
+    "ultimo_push": "2026-10-07T21:04:24-03:00"
+  },
+  "commits": {
+    "total": 44,
+    "autores": [
+      "Bruno Novodovoski"
+    ],
+    "primeiro": "2026-10-07T19:12:18-03:00",
+    "ultimo": "2026-10-07T21:04:24-03:00",
+    "fora_da_janela": 0
+  },
+  "nota_parcial": {
+    "valor": null,
+    "criterios": {}
+  },
+  "auto_correcao": {
+    "executada": true,
+    "nota_ultima": 20
+  },
+  "fontes": {
+    "presente": true,
+    "declarou_vazio": false,
+    "links": 0
+  }
+}
